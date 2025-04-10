@@ -7,14 +7,30 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tracing::{ info, warn, error, debug };
 use indicatif::{ ProgressBar, ProgressStyle };
+use dotenv::dotenv;
+use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Initialize the tracing logger
     tracing_subscriber::fmt::init();
 
+    dotenv().ok();
+
     // Replace with your GitHub API token.
-    let bearer_token = "YOUR_BEARER_TOKEN";
+    let bearer_token = match env::var("GITHUB_TOKEN") {
+        Ok(token) => {
+            if token.trim().is_empty() {
+                error!("GITHUB_TOKEN environment variable is empty");
+                return Err("GitHub token is empty".into());
+            }
+            token
+        }
+        Err(_) => {
+            error!("GITHUB_TOKEN environment variable not found");
+            return Err("GitHub token not found in environment".into());
+        }
+    };
 
     // Array of words to search for.
     let words = vec!["shit", "fuck", "damn", "penis", "poop", "funky"];
