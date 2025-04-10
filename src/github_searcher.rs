@@ -154,12 +154,8 @@ impl GitHubSearcher {
         // Create semaphore for concurrency control
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
 
-        // Create output file
-        let file = Arc::new(
-            tokio::sync::Mutex::new(
-                OpenOptions::new().create(true).append(true).open(&self.output_path).await?
-            )
-        );
+        // Create a thread-safe collection to store all results
+        let all_results = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
         // Create progress bars for all words upfront
         let progress_bars: Arc<std::collections::HashMap<String, ProgressBar>> = {
@@ -209,10 +205,10 @@ impl GitHubSearcher {
             let sem_clone = semaphore.clone();
             let client_clone = self.client.clone();
             let token_clone = self.token.clone();
-            let file_clone = file.clone();
             let max_pages = self.max_page_limit;
             let pb = progress_bars.get(&word).unwrap().clone();
             let rate_limit_pb_clone = rate_limit_pb.clone();
+            let results_clone = all_results.clone();
 
             // Start a background ticker to keep spinner animated
             let pb_ticker = pb.clone();
@@ -236,10 +232,10 @@ impl GitHubSearcher {
                     &client_clone,
                     &token_clone,
                     &word_clone,
-                    file_clone,
                     max_pages,
                     pb.clone(),
-                    rate_limit_pb_clone
+                    rate_limit_pb_clone,
+                    results_clone
                 ).await;
 
                 // Finalize progress bar
@@ -274,6 +270,22 @@ impl GitHubSearcher {
             }
         }
 
+        // Write all accumulated results to file as a single JSON array
+        info!("Writing all results to disk as a single JSON array");
+        let all_results_guard = all_results.lock().await;
+        let json_output = serde_json::to_string(&*all_results_guard)?;
+
+        // Create output file
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.output_path).await?;
+
+        // Write JSON array to file
+        file.write_all(json_output.as_bytes()).await?;
+        file.flush().await?;
+
         info!("All searches completed successfully");
         Ok(())
     }
@@ -290,10 +302,10 @@ impl GitHubSearcher {
     /// * `client` - HTTP client for making API requests
     /// * `token` - GitHub API token for authentication
     /// * `word` - The search term to look for
-    /// * `file` - File handle for saving results
     /// * `max_page_limit` - Optional maximum number of pages to retrieve
     /// * `pb` - Progress bar for this search term
     /// * `rate_limit_pb` - Progress bar for rate limit visualization
+    /// * `all_results` - Shared collection to store results
     ///
     /// # Returns
     ///
@@ -306,10 +318,10 @@ impl GitHubSearcher {
         client: &Client,
         token: &str,
         word: &str,
-        file: Arc<tokio::sync::Mutex<tokio::fs::File>>,
         max_page_limit: Option<u32>,
         pb: ProgressBar,
-        rate_limit_pb: Arc<ProgressBar>
+        rate_limit_pb: Arc<ProgressBar>,
+        all_results: Arc<tokio::sync::Mutex<Vec<Value>>>
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut page: u32 = 1;
 
@@ -323,9 +335,9 @@ impl GitHubSearcher {
                     token,
                     word,
                     page,
-                    &file,
                     &pb,
-                    &rate_limit_pb
+                    &rate_limit_pb,
+                    &all_results
                 ).await
             {
                 Ok(has_more_pages) => {
@@ -360,7 +372,7 @@ impl GitHubSearcher {
     /// 1. Makes a GitHub API request
     /// 2. Handles rate limiting
     /// 3. Processes and filters the response
-    /// 4. Writes filtered results to the output file
+    /// 4. Adds filtered results to the shared collection
     ///
     /// # Arguments
     ///
@@ -368,9 +380,9 @@ impl GitHubSearcher {
     /// * `token` - GitHub API token for authentication
     /// * `word` - The search term to look for
     /// * `page` - Page number to retrieve (1-based)
-    /// * `file` - File handle for saving results
     /// * `pb` - Progress bar for this search term
     /// * `rate_limit_pb` - Progress bar for rate limit visualization
+    /// * `all_results` - Shared collection to store results
     ///
     /// # Returns
     ///
@@ -383,15 +395,14 @@ impl GitHubSearcher {
     /// - API request failures
     /// - Authentication issues
     /// - JSON parsing problems
-    /// - File I/O errors
     async fn search_page(
         client: &Client,
         token: &str,
         word: &str,
         page: u32,
-        file: &Arc<tokio::sync::Mutex<tokio::fs::File>>,
         pb: &ProgressBar,
-        rate_limit_pb: &ProgressBar
+        rate_limit_pb: &ProgressBar,
+        all_results: &Arc<tokio::sync::Mutex<Vec<Value>>>
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let url = format!(
             "https://api.github.com/search/code?q={}&page={}&per_page=100",
@@ -494,14 +505,12 @@ impl GitHubSearcher {
             return Ok(false);
         }
 
-        // Write results to file
-        let filtered_json = serde_json::to_string(&filtered_items)?;
-        let mut file_guard = file.lock().await;
-        file_guard.write_all(filtered_json.as_bytes()).await?;
-        file_guard.write_all(b"\n").await?;
-        file_guard.flush().await?;
+        // Add results to the shared collection
+        let mut results_guard = all_results.lock().await;
+        results_guard.extend(filtered_items.clone());
+        drop(results_guard);
 
-        info!("Saved {} results for '{}' page {}", filtered_items.len(), word, page);
+        info!("Collected {} results for '{}' page {}", filtered_items.len(), word, page);
         Ok(true)
     }
 
