@@ -1,3 +1,13 @@
+//! # GitHub Searcher Module
+//!
+//! This module provides functionality for searching GitHub code repositories
+//! with advanced features like concurrent searches, rate-limit handling,
+//! and real-time progress visualization.
+//!
+//! The core component is the `GitHubSearcher` struct which manages
+//! all search operations and handles paginated results, GitHub API interactions,
+//! and concurrent execution.
+
 use chrono::Utc;
 use futures::future::join_all;
 use indicatif::{ MultiProgress, ProgressBar, ProgressStyle };
@@ -14,17 +24,62 @@ use tracing::{ debug, error, info, warn };
 
 use crate::Args;
 
+/// GitHubSearcher handles all aspects of searching for code on GitHub,
+/// including authentication, API rate limiting, concurrent processing,
+/// and results management.
+///
+/// This struct encapsulates the search process flow with a focus on
+/// concurrent execution and user feedback through progress indicators.
 pub struct GitHubSearcher {
+    /// HTTP client for making API requests
     client: Client,
+
+    /// GitHub API token for authentication
     token: String,
+
+    /// Path where search results will be saved
     output_path: String,
+
+    /// Optional limit on the number of pages to retrieve per search term
     max_page_limit: Option<u32>,
+
+    /// Multi-progress display for showing search progress
     progress: Arc<MultiProgress>,
+
+    /// Maximum number of concurrent searches to run
     concurrency: usize,
 }
 
 impl GitHubSearcher {
-    /// Create a new GitHubSearcher instance
+    /// Creates a new GitHubSearcher instance configured with the provided arguments.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - Command line arguments containing search configuration
+    ///
+    /// # Returns
+    ///
+    /// A Result containing either the configured GitHubSearcher or an error
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if:
+    /// - GitHub token is not provided and not found in environment
+    /// - HTTP client creation fails
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use github_code_searching::{Args, GitHubSearcher};
+    /// use clap::Parser;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ///     let args = Args::parse();
+    ///     let searcher = GitHubSearcher::new(&args).await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn new(args: &Args) -> Result<Self, Box<dyn Error + Send + Sync>> {
         // Get GitHub API token from arguments or environment
         let token = match &args.token {
@@ -57,7 +112,44 @@ impl GitHubSearcher {
         })
     }
 
-    /// Run all searches with concurrency control
+    /// Executes searches for all provided words with concurrency control
+    /// and displays progress in real-time.
+    ///
+    /// This method orchestrates the entire search process:
+    /// 1. Sets up progress bars for visualization
+    /// 2. Spawns a concurrent task for each search term
+    /// 3. Manages concurrency with a semaphore
+    /// 4. Handles result output and error reporting
+    ///
+    /// # Arguments
+    ///
+    /// * `words` - Vector of search terms to process
+    ///
+    /// # Returns
+    ///
+    /// A Result indicating success or an error encountered during search
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if any search task fails, including:
+    /// - API request errors
+    /// - Authentication failures
+    /// - File I/O errors when saving results
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use github_code_searching::{Args, GitHubSearcher};
+    /// use clap::Parser;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ///     let args = Args::parse();
+    ///     let searcher = GitHubSearcher::new(&args).await?;
+    ///     searcher.run(vec!["rust concurrency".to_string(), "tokio async".to_string()]).await?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub async fn run(&self, words: Vec<String>) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Create semaphore for concurrency control
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
@@ -186,7 +278,30 @@ impl GitHubSearcher {
         Ok(())
     }
 
-    /// Search for a specific word
+    /// Executes a search for a single word, handling all pages of results.
+    ///
+    /// This method handles the complete search process for one term, including:
+    /// - Pagination through all results
+    /// - Progress updates
+    /// - Respecting page limits
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - HTTP client for making API requests
+    /// * `token` - GitHub API token for authentication
+    /// * `word` - The search term to look for
+    /// * `file` - File handle for saving results
+    /// * `max_page_limit` - Optional maximum number of pages to retrieve
+    /// * `pb` - Progress bar for this search term
+    /// * `rate_limit_pb` - Progress bar for rate limit visualization
+    ///
+    /// # Returns
+    ///
+    /// A Result indicating success or an error encountered during search
+    ///
+    /// # Errors
+    ///
+    /// Will propagate errors from the page search process
     async fn search_word(
         client: &Client,
         token: &str,
@@ -239,7 +354,36 @@ impl GitHubSearcher {
         Ok(())
     }
 
-    /// Search a specific page for a word
+    /// Searches a specific page of results for a search term.
+    ///
+    /// This method:
+    /// 1. Makes a GitHub API request
+    /// 2. Handles rate limiting
+    /// 3. Processes and filters the response
+    /// 4. Writes filtered results to the output file
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - HTTP client for making API requests
+    /// * `token` - GitHub API token for authentication
+    /// * `word` - The search term to look for
+    /// * `page` - Page number to retrieve (1-based)
+    /// * `file` - File handle for saving results
+    /// * `pb` - Progress bar for this search term
+    /// * `rate_limit_pb` - Progress bar for rate limit visualization
+    ///
+    /// # Returns
+    ///
+    /// A Result containing a boolean indicating if more pages exist (true)
+    /// or if this was the last page (false)
+    ///
+    /// # Errors
+    ///
+    /// Will return an error for:
+    /// - API request failures
+    /// - Authentication issues
+    /// - JSON parsing problems
+    /// - File I/O errors
     async fn search_page(
         client: &Client,
         token: &str,
@@ -361,7 +505,26 @@ impl GitHubSearcher {
         Ok(true)
     }
 
-    /// Handle GitHub API rate limiting with progress bar
+    /// Handles GitHub API rate limiting with visual feedback.
+    ///
+    /// When rate limits are approached or reached, this method:
+    /// 1. Updates the rate limit progress bar
+    /// 2. Calculates and displays remaining capacity
+    /// 3. If limits are exceeded, waits with a countdown until reset
+    ///
+    /// # Arguments
+    ///
+    /// * `headers` - Response headers from GitHub API containing rate limit info
+    /// * `pb` - Progress bar for current search operation
+    /// * `rate_limit_pb` - Progress bar dedicated to rate limit visualization
+    ///
+    /// # Returns
+    ///
+    /// A Result indicating success or failure of rate limit handling
+    ///
+    /// # Errors
+    ///
+    /// Generally doesn't produce errors, but propagates any unexpected issues
     async fn handle_rate_limit(
         headers: &reqwest::header::HeaderMap,
         pb: &ProgressBar,
