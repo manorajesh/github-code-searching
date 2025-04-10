@@ -45,18 +45,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let file_path = "big_results.json";
     let mut file = OpenOptions::new().create(true).append(true).open(file_path).await?;
 
+    // Create a single progress bar that will stay at the bottom
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .unwrap()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+    );
+
     // Process each search word
     for word in words {
         info!("Starting search for word: '{}'", word);
-
-        // Create a spinner progress bar for the current word.
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-        );
+        pb.set_message(format!("Processing word: {}", word));
 
         let mut page: u32 = 1;
 
@@ -96,6 +97,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             warn!(
                                                 "Rate limit reached. Waiting {} seconds...",
                                                 wait_secs + 1
+                                            );
+                                            pb.set_message(
+                                                format!(
+                                                    "Rate limit hit - waiting {} seconds",
+                                                    wait_secs + 1
+                                                )
                                             );
                                             sleep(Duration::from_secs(wait_secs + 1)).await;
                                         }
@@ -145,9 +152,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             pb.tick();
         } // end page loop
 
-        pb.finish_with_message(format!("Finished '{}' search", word));
+        pb.set_message(format!("Finished '{}' search", word));
     } // end word loop
 
+    // Finish the progress bar
+    pb.finish_and_clear();
     info!("Finished saving results to '{}'", file_path);
     Ok(())
 }
