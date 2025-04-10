@@ -1,18 +1,18 @@
-use reqwest::{ Client, StatusCode };
-use std::error::Error;
-use tokio::time::{ sleep, Duration };
 use chrono::Utc;
-use serde_json::{ Value, json };
+use clap::Parser;
+use dotenv::dotenv;
+use futures::future::join_all;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use reqwest::{Client, StatusCode};
+use serde_json::{json, Value};
+use std::env;
+use std::error::Error;
+use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
-use tracing::{ info, warn, error, debug };
-use indicatif::{ MultiProgress, ProgressBar, ProgressStyle };
-use dotenv::dotenv;
-use std::env;
-use std::sync::Arc;
 use tokio::sync::Semaphore;
-use futures::future::join_all;
-use clap::{ Parser, ArgAction };
+use tokio::time::{sleep, Duration};
+use tracing::{debug, error, info, warn};
 
 /// GitHub Code Search CLI
 #[derive(Parser)]
@@ -54,19 +54,19 @@ impl GitHubSearcher {
         // Get GitHub API token from arguments or environment
         let token = match &args.token {
             Some(t) if !t.trim().is_empty() => t.clone(),
-            _ => {
-                match env::var("GITHUB_TOKEN") {
-                    Ok(token) if !token.trim().is_empty() => token,
-                    _ => {
-                        error!("GitHub token not provided or found in environment");
-                        return Err("GitHub token is required".into());
-                    }
+            _ => match env::var("GITHUB_TOKEN") {
+                Ok(token) if !token.trim().is_empty() => token,
+                _ => {
+                    error!("GitHub token not provided or found in environment");
+                    return Err("GitHub token is required".into());
                 }
-            }
+            },
         };
 
         // Create HTTP client
-        let client = Client::builder().user_agent("Rust GitHub API Client").build()?;
+        let client = Client::builder()
+            .user_agent("Rust GitHub API Client")
+            .build()?;
 
         // Create progress display
         let progress = Arc::new(MultiProgress::new());
@@ -87,11 +87,13 @@ impl GitHubSearcher {
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
 
         // Create output file
-        let file = Arc::new(
-            tokio::sync::Mutex::new(
-                OpenOptions::new().create(true).append(true).open(&self.output_path).await?
-            )
-        );
+        let file = Arc::new(tokio::sync::Mutex::new(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.output_path)
+                .await?,
+        ));
 
         // Launch tasks for each word
         let mut tasks = Vec::new();
@@ -115,7 +117,7 @@ impl GitHubSearcher {
                     ProgressStyle::default_spinner()
                         .template("{spinner:.green} [{elapsed_precise}] {msg}")
                         .unwrap()
-                        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
                 );
                 pb.set_message(format!("Starting search for '{}'", word_clone));
 
@@ -126,8 +128,9 @@ impl GitHubSearcher {
                     &word_clone,
                     file_clone,
                     max_pages,
-                    pb.clone()
-                ).await;
+                    pb.clone(),
+                )
+                .await;
 
                 // Finalize progress bar
                 if result.is_ok() {
@@ -164,7 +167,7 @@ impl GitHubSearcher {
         word: &str,
         file: Arc<tokio::sync::Mutex<tokio::fs::File>>,
         max_page_limit: Option<u32>,
-        pb: ProgressBar
+        pb: ProgressBar,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut page: u32 = 1;
 
@@ -190,7 +193,10 @@ impl GitHubSearcher {
             // Check page limit
             if let Some(max_page) = max_page_limit {
                 if page > max_page {
-                    info!("Max page limit reached for '{}' (limit: {})", word, max_page);
+                    info!(
+                        "Max page limit reached for '{}' (limit: {})",
+                        word, max_page
+                    );
                     break;
                 }
             }
@@ -208,12 +214,11 @@ impl GitHubSearcher {
         word: &str,
         page: u32,
         file: &Arc<tokio::sync::Mutex<tokio::fs::File>>,
-        pb: &ProgressBar
+        pb: &ProgressBar,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let url = format!(
             "https://api.github.com/search/code?q={}&page={}&per_page=100",
-            word,
-            page
+            word, page
         );
 
         debug!("Requesting URL: {}", url);
@@ -222,7 +227,8 @@ impl GitHubSearcher {
             .header("Accept", "application/vnd.github.text-match+json")
             .header("Authorization", format!("Bearer {}", token))
             .header("X-GitHub-Api-Version", "2022-11-28")
-            .send().await?;
+            .send()
+            .await?;
 
         // Handle pagination limit
         if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
@@ -235,9 +241,13 @@ impl GitHubSearcher {
 
         // Check for other errors
         if !response.status().is_success() {
-            return Err(
-                format!("API error: {} on word '{}' page {}", response.status(), word, page).into()
-            );
+            return Err(format!(
+                "API error: {} on word '{}' page {}",
+                response.status(),
+                word,
+                page
+            )
+            .into());
         }
 
         // Parse response
@@ -251,14 +261,8 @@ impl GitHubSearcher {
             }
 
             for item in items {
-                let name = item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let html_url = item
-                    .get("html_url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let html_url = item.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
 
                 let repo_owner = if let Some(repo) = item.get("repository") {
                     repo.get("owner")
@@ -285,8 +289,7 @@ impl GitHubSearcher {
                     .unwrap_or_else(|| json!([]));
 
                 // Build filtered JSON object
-                let new_item =
-                    json!({
+                let new_item = json!({
                     "name": name,
                     "html_url": html_url,
                     "search_term": word,
@@ -312,14 +315,19 @@ impl GitHubSearcher {
         file_guard.write_all(b"\n").await?;
         file_guard.flush().await?;
 
-        info!("Saved {} results for '{}' page {}", filtered_items.len(), word, page);
+        info!(
+            "Saved {} results for '{}' page {}",
+            filtered_items.len(),
+            word,
+            page
+        );
         Ok(true)
     }
 
     /// Handle GitHub API rate limiting
     async fn handle_rate_limit(
         headers: &reqwest::header::HeaderMap,
-        pb: &ProgressBar
+        pb: &ProgressBar,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if let Some(remaining_header) = headers.get("X-RateLimit-Remaining") {
             if let Ok(remaining_str) = remaining_header.to_str() {
@@ -335,12 +343,10 @@ impl GitHubSearcher {
                                             "Rate limit reached. Waiting {} seconds...",
                                             wait_secs + 1
                                         );
-                                        pb.set_message(
-                                            format!(
-                                                "Rate limit hit - waiting {} seconds",
-                                                wait_secs + 1
-                                            )
-                                        );
+                                        pb.set_message(format!(
+                                            "Rate limit hit - waiting {} seconds",
+                                            wait_secs + 1
+                                        ));
                                         sleep(Duration::from_secs(wait_secs + 1)).await;
                                     }
                                 }
