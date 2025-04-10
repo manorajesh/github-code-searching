@@ -1,6 +1,6 @@
 [package]
 name = "github-code-searching"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Search and save code for keywords from GitHub"
 readme = "README.md"
@@ -27,3 +27,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 debug = false
+
+[lib]
+name = "github_code_searching"
+path = "src/main.rs"
