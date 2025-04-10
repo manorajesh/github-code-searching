@@ -30,4 +30,12 @@ pub struct Args {
     /// Maximum number of concurrent searches.
     #[clap(short = 'c', long, default_value = "4")]
     pub concurrency: usize,
+
+    /// Include only files with these extensions (e.g., "rs,js,py")
+    #[clap(long = "include", value_delimiter = ',')]
+    pub include_extensions: Option<Vec<String>>,
+
+    /// Exclude files with these extensions (e.g., "md,txt,json")
+    #[clap(long = "exclude", value_delimiter = ',')]
+    pub exclude_extensions: Option<Vec<String>>,
 }

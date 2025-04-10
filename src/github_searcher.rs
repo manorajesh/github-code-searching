@@ -48,6 +48,12 @@ pub struct GitHubSearcher {
 
     /// Maximum number of concurrent searches to run
     concurrency: usize,
+
+    /// List of file extensions to include in the search
+    include_extensions: Arc<tokio::sync::Mutex<Vec<String>>>,
+
+    /// List of file extensions to exclude from the search
+    exclude_extensions: Arc<tokio::sync::Mutex<Vec<String>>>,
 }
 
 impl GitHubSearcher {
@@ -109,6 +115,12 @@ impl GitHubSearcher {
             max_page_limit: args.max_pages,
             progress,
             concurrency: args.concurrency,
+            include_extensions: Arc::new(
+                tokio::sync::Mutex::new(args.include_extensions.clone().unwrap_or_default())
+            ),
+            exclude_extensions: Arc::new(
+                tokio::sync::Mutex::new(args.exclude_extensions.clone().unwrap_or_default())
+            ),
         })
     }
 
@@ -220,6 +232,9 @@ impl GitHubSearcher {
             });
             spinner_tasks.push(spinner_task);
 
+            let exclude_extensions = self.exclude_extensions.clone();
+            let include_extensions = self.include_extensions.clone();
+
             // Main search task
             let task = tokio::spawn(async move {
                 // Acquire semaphore permit
@@ -235,6 +250,8 @@ impl GitHubSearcher {
                     max_pages,
                     pb.clone(),
                     rate_limit_pb_clone,
+                    exclude_extensions.clone(),
+                    include_extensions.clone(),
                     results_clone
                 ).await;
 
@@ -321,6 +338,8 @@ impl GitHubSearcher {
         max_page_limit: Option<u32>,
         pb: ProgressBar,
         rate_limit_pb: Arc<ProgressBar>,
+        exclude_extensions: Arc<tokio::sync::Mutex<Vec<String>>>,
+        include_extensions: Arc<tokio::sync::Mutex<Vec<String>>>,
         all_results: Arc<tokio::sync::Mutex<Vec<Value>>>
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut page: u32 = 1;
@@ -337,6 +356,8 @@ impl GitHubSearcher {
                     page,
                     &pb,
                     &rate_limit_pb,
+                    &exclude_extensions,
+                    &include_extensions,
                     &all_results
                 ).await
             {
@@ -402,8 +423,24 @@ impl GitHubSearcher {
         page: u32,
         pb: &ProgressBar,
         rate_limit_pb: &ProgressBar,
+        exclude_extensions: &Arc<tokio::sync::Mutex<Vec<String>>>,
+        include_extensions: &Arc<tokio::sync::Mutex<Vec<String>>>,
         all_results: &Arc<tokio::sync::Mutex<Vec<Value>>>
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        // Construct the search URL
+        // Include extensions if provided
+        let include_ext = &*include_extensions.lock().await;
+        let include_ext_str = include_ext.join("%20extension:");
+        let exclude_ext = &*exclude_extensions.lock().await;
+        let exclude_ext_str = exclude_ext.join("%20-extension:");
+        let word = if !include_ext.is_empty() {
+            format!("{} extension:{}", word, include_ext_str)
+        } else if !exclude_ext.is_empty() {
+            format!("{} -extension:{}", word, exclude_ext_str)
+        } else {
+            word.to_string()
+        };
+
         let url = format!(
             "https://api.github.com/search/code?q={}&page={}&per_page=100",
             word,
@@ -428,7 +465,7 @@ impl GitHubSearcher {
         GitHubSearcher::handle_rate_limit(response.headers(), pb, rate_limit_pb).await?;
 
         // Check for other errors
-        if !response.status().is_success() {
+        if !response.status().is_success() && response.status() != StatusCode::FORBIDDEN {
             return Err(
                 format!("API error: {} on word '{}' page {}", response.status(), word, page).into()
             );
