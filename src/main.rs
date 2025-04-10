@@ -27,7 +27,7 @@ pub struct Args {
     token: Option<String>,
 
     /// Maximum number of concurrent searches
-    #[clap(short = 'c', long, default_value = "2")]
+    #[clap(short = 'c', long, default_value = "4")]
     concurrency: usize,
 }
 

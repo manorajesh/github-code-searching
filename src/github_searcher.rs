@@ -1,17 +1,16 @@
 use chrono::Utc;
-use clap::Parser;
 use futures::future::join_all;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use reqwest::{Client, StatusCode};
-use serde_json::{json, Value};
+use indicatif::{ MultiProgress, ProgressBar, ProgressStyle };
+use reqwest::{ Client, StatusCode };
+use serde_json::{ json, Value };
 use std::env;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
-use tokio::time::{Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tokio::time::{ Duration, Instant };
+use tracing::{ debug, error, info, warn };
 
 use crate::Args;
 
@@ -30,13 +29,14 @@ impl GitHubSearcher {
         // Get GitHub API token from arguments or environment
         let token = match &args.token {
             Some(t) if !t.trim().is_empty() => t.clone(),
-            _ => match env::var("GITHUB_TOKEN") {
-                Ok(token) if !token.trim().is_empty() => token,
-                _ => {
-                    error!("GitHub token not provided or found in environment");
-                    return Err("GitHub token is required".into());
+            _ =>
+                match env::var("GITHUB_TOKEN") {
+                    Ok(token) if !token.trim().is_empty() => token,
+                    _ => {
+                        error!("GitHub token not provided or found in environment");
+                        return Err("GitHub token is required".into());
+                    }
                 }
-            },
         };
 
         // Create HTTP client
@@ -63,13 +63,11 @@ impl GitHubSearcher {
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
 
         // Create output file
-        let file = Arc::new(tokio::sync::Mutex::new(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.output_path)
-                .await?,
-        ));
+        let file = Arc::new(
+            tokio::sync::Mutex::new(
+                OpenOptions::new().create(true).append(true).open(&self.output_path).await?
+            )
+        );
 
         // Create progress bars for all words upfront
         let progress_bars: Arc<std::collections::HashMap<String, ProgressBar>> = {
@@ -105,7 +103,7 @@ impl GitHubSearcher {
             ProgressStyle::default_bar()
                 .template("[{elapsed_precise}] {bar:40.red/yellow} {pos:>7}/{len:7} {wide_msg}")
                 .unwrap()
-                .progress_chars("=>-"),
+                .progress_chars("=>-")
         );
         rate_limit_pb.set_message("Rate limit status: OK");
         rate_limit_pb.set_position(100); // Start full
@@ -149,9 +147,8 @@ impl GitHubSearcher {
                     file_clone,
                     max_pages,
                     pb.clone(),
-                    rate_limit_pb_clone,
-                )
-                .await;
+                    rate_limit_pb_clone
+                ).await;
 
                 // Finalize progress bar
                 if result.is_ok() {
@@ -197,7 +194,7 @@ impl GitHubSearcher {
         file: Arc<tokio::sync::Mutex<tokio::fs::File>>,
         max_page_limit: Option<u32>,
         pb: ProgressBar,
-        rate_limit_pb: Arc<ProgressBar>,
+        rate_limit_pb: Arc<ProgressBar>
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut page: u32 = 1;
 
@@ -205,8 +202,16 @@ impl GitHubSearcher {
             pb.set_message(format!("Searching {} - page {}", word, page));
 
             // Search this page
-            match GitHubSearcher::search_page(client, token, word, page, &file, &pb, &rate_limit_pb)
-                .await
+            match
+                GitHubSearcher::search_page(
+                    client,
+                    token,
+                    word,
+                    page,
+                    &file,
+                    &pb,
+                    &rate_limit_pb
+                ).await
             {
                 Ok(has_more_pages) => {
                     if !has_more_pages {
@@ -225,10 +230,7 @@ impl GitHubSearcher {
             // Check page limit
             if let Some(max_page) = max_page_limit {
                 if page > max_page {
-                    info!(
-                        "Max page limit reached for '{}' (limit: {})",
-                        word, max_page
-                    );
+                    info!("Max page limit reached for '{}' (limit: {})", word, max_page);
                     break;
                 }
             }
@@ -245,11 +247,12 @@ impl GitHubSearcher {
         page: u32,
         file: &Arc<tokio::sync::Mutex<tokio::fs::File>>,
         pb: &ProgressBar,
-        rate_limit_pb: &ProgressBar,
+        rate_limit_pb: &ProgressBar
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let url = format!(
             "https://api.github.com/search/code?q={}&page={}&per_page=100",
-            word, page
+            word,
+            page
         );
 
         debug!("Requesting URL: {}", url);
@@ -258,8 +261,7 @@ impl GitHubSearcher {
             .header("Accept", "application/vnd.github.text-match+json")
             .header("Authorization", format!("Bearer {}", token))
             .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await?;
+            .send().await?;
 
         // Handle pagination limit
         if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
@@ -272,13 +274,9 @@ impl GitHubSearcher {
 
         // Check for other errors
         if !response.status().is_success() {
-            return Err(format!(
-                "API error: {} on word '{}' page {}",
-                response.status(),
-                word,
-                page
-            )
-            .into());
+            return Err(
+                format!("API error: {} on word '{}' page {}", response.status(), word, page).into()
+            );
         }
 
         // Parse response
@@ -292,10 +290,19 @@ impl GitHubSearcher {
             }
 
             for item in items {
-                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let html_url = item.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let html_url = item
+                    .get("html_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 // Extract SHA hash
-                let sha = item.get("sha").and_then(|v| v.as_str()).unwrap_or("");
+                let sha = item
+                    .get("sha")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 let repo_owner = if let Some(repo) = item.get("repository") {
                     repo.get("owner")
@@ -322,7 +329,8 @@ impl GitHubSearcher {
                     .unwrap_or_else(|| json!([]));
 
                 // Build filtered JSON object
-                let new_item = json!({
+                let new_item =
+                    json!({
                     "name": name,
                     "html_url": html_url,
                     "sha": sha,
@@ -349,12 +357,7 @@ impl GitHubSearcher {
         file_guard.write_all(b"\n").await?;
         file_guard.flush().await?;
 
-        info!(
-            "Saved {} results for '{}' page {}",
-            filtered_items.len(),
-            word,
-            page
-        );
+        info!("Saved {} results for '{}' page {}", filtered_items.len(), word, page);
         Ok(true)
     }
 
@@ -362,7 +365,7 @@ impl GitHubSearcher {
     async fn handle_rate_limit(
         headers: &reqwest::header::HeaderMap,
         pb: &ProgressBar,
-        rate_limit_pb: &ProgressBar,
+        rate_limit_pb: &ProgressBar
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Update rate limit indicator
         if let Some(remaining_header) = headers.get("X-RateLimit-Remaining") {
@@ -378,8 +381,9 @@ impl GitHubSearcher {
                                     100
                                 };
 
-                                rate_limit_pb
-                                    .set_message(format!("Rate limit: {}/{}", remaining, limit));
+                                rate_limit_pb.set_message(
+                                    format!("Rate limit: {}/{}", remaining, limit)
+                                );
                                 rate_limit_pb.set_position(percentage.into());
 
                                 // If we're out of requests, wait for reset
@@ -397,15 +401,18 @@ impl GitHubSearcher {
 
                                                     // Save the current message to restore later
                                                     let original_msg = pb.message();
-                                                    pb.set_message(format!(
-                                                        "Rate limited - waiting {} seconds",
-                                                        wait_secs + 1
-                                                    ));
+                                                    pb.set_message(
+                                                        format!(
+                                                            "Rate limited - waiting {} seconds",
+                                                            wait_secs + 1
+                                                        )
+                                                    );
 
                                                     // Create a visual countdown
                                                     let start = Instant::now();
-                                                    let duration =
-                                                        Duration::from_secs(wait_secs + 1);
+                                                    let duration = Duration::from_secs(
+                                                        wait_secs + 1
+                                                    );
                                                     let end = start + duration;
 
                                                     while Instant::now() < end {
@@ -414,26 +421,26 @@ impl GitHubSearcher {
                                                             let remaining = duration - elapsed;
                                                             let secs_remaining =
                                                                 remaining.as_secs();
-                                                            let percentage = ((duration
-                                                                - remaining)
-                                                                .as_millis()
-                                                                * 100)
-                                                                / duration.as_millis();
+                                                            let percentage =
+                                                                ((
+                                                                    duration - remaining
+                                                                ).as_millis() *
+                                                                    100) /
+                                                                duration.as_millis();
 
-                                                            rate_limit_pb
-                                                                .set_position(percentage as u64);
+                                                            rate_limit_pb.set_position(
+                                                                percentage as u64
+                                                            );
                                                             rate_limit_pb.set_message(
                                                                 format!("Rate limit cooldown: {}s remaining", secs_remaining)
                                                             );
-                                                            pb.set_message(format!(
-                                                                "Rate limited - waiting {}s",
-                                                                secs_remaining
-                                                            ));
+                                                            pb.set_message(
+                                                                format!("Rate limited - waiting {}s", secs_remaining)
+                                                            );
 
                                                             tokio::time::sleep(
-                                                                Duration::from_millis(500),
-                                                            )
-                                                            .await;
+                                                                Duration::from_millis(500)
+                                                            ).await;
                                                         } else {
                                                             break;
                                                         }
@@ -441,8 +448,9 @@ impl GitHubSearcher {
 
                                                     // Reset rate limit bar and restore original message
                                                     rate_limit_pb.set_position(100);
-                                                    rate_limit_pb
-                                                        .set_message("Rate limit status: Ready");
+                                                    rate_limit_pb.set_message(
+                                                        "Rate limit status: Ready"
+                                                    );
                                                     pb.set_message(original_msg);
                                                 }
                                             }
