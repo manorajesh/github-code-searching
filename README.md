@@ -1,4 +1,11 @@
-# GitHub Code Searcher
+# github code searcher
+
+![Build Status](https://github.com/manorajesh/github-code-searching/actions/workflows/MacOS.yml/badge.svg)
+![Build Status](https://github.com/manorajesh/github-code-searching/actions/workflows/Linux.yml/badge.svg)
+![Build Status](https://github.com/manorajesh/github-code-searching/actions/workflows/Windows.yml/badge.svg)
+![Downloads](https://img.shields.io/crates/d/github-code-searching)
+![Version](https://img.shields.io/crates/v/github-code-searching)
+![License](https://img.shields.io/crates/l/github-code-searching)
 
 A powerful, concurrent CLI tool for searching code across GitHub repositories with advanced rate-limit handling and progress visualization.
 
