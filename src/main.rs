@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
-use tokio::time::{ sleep, Duration };
+use tokio::time::{ sleep, Duration, Instant };
 use tracing::{ debug, error, info, warn };
 
 /// GitHub Code Search CLI
@@ -94,8 +94,48 @@ impl GitHubSearcher {
             )
         );
 
+        // Create progress bars for all words upfront
+        let progress_bars: Arc<std::collections::HashMap<String, ProgressBar>> = {
+            let mut bars = std::collections::HashMap::new();
+
+            // Create a main spinner style
+            let spinner_style = ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] {wide_msg}")
+                .unwrap()
+                .progress_chars("=>-")
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
+
+            // Create a progress bar style for rate limiting
+            let progress_style = ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {wide_msg}")
+                .unwrap()
+                .progress_chars("=>-");
+
+            // Add a progress bar for each word
+            for word in &words {
+                let pb = self.progress.add(ProgressBar::new_spinner());
+                pb.set_style(spinner_style.clone());
+                pb.set_message(format!("Waiting to search for '{}'", word));
+                bars.insert(word.clone(), pb);
+            }
+
+            Arc::new(bars)
+        };
+
+        // Add a rate limit progress bar at the bottom
+        let rate_limit_pb = Arc::new(self.progress.add(ProgressBar::new(100)));
+        rate_limit_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.red/yellow} {pos:>7}/{len:7} {wide_msg}")
+                .unwrap()
+                .progress_chars("=>-")
+        );
+        rate_limit_pb.set_message("Rate limit status: OK");
+        rate_limit_pb.set_position(100); // Start full
+
         // Launch tasks for each word
         let mut tasks = Vec::new();
+        let mut spinner_tasks = Vec::new();
 
         for word in words {
             let word_clone = word.clone();
@@ -103,21 +143,25 @@ impl GitHubSearcher {
             let client_clone = self.client.clone();
             let token_clone = self.token.clone();
             let file_clone = file.clone();
-            let progress_clone = self.progress.clone();
             let max_pages = self.max_page_limit;
+            let pb = progress_bars.get(&word).unwrap().clone();
+            let rate_limit_pb_clone = rate_limit_pb.clone();
 
+            // Start a background ticker to keep spinner animated
+            let pb_ticker = pb.clone();
+            let spinner_task = tokio::spawn(async move {
+                loop {
+                    pb_ticker.tick();
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                }
+            });
+            spinner_tasks.push(spinner_task);
+
+            // Main search task
             let task = tokio::spawn(async move {
                 // Acquire semaphore permit
                 let _permit = sem_clone.acquire().await.unwrap();
 
-                // Create progress bar for this word
-                let pb = progress_clone.add(ProgressBar::new_spinner());
-                pb.set_style(
-                    ProgressStyle::default_spinner()
-                        .template("{spinner:.green} [{elapsed_precise}] {msg}")
-                        .unwrap()
-                        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-                );
                 pb.set_message(format!("Starting search for '{}'", word_clone));
 
                 // Process this word
@@ -127,14 +171,15 @@ impl GitHubSearcher {
                     &word_clone,
                     file_clone,
                     max_pages,
-                    pb.clone()
+                    pb.clone(),
+                    rate_limit_pb_clone
                 ).await;
 
                 // Finalize progress bar
                 if result.is_ok() {
-                    pb.finish_with_message(format!("✓ Completed '{}'", word_clone));
+                    pb.set_message(format!("✓ Completed '{}'", word_clone));
                 } else {
-                    pb.finish_with_message(format!("✗ Failed '{}'", word_clone));
+                    pb.set_message(format!("✗ Failed '{}'", word_clone));
                 }
 
                 result
@@ -145,6 +190,14 @@ impl GitHubSearcher {
 
         // Await all tasks
         let results = join_all(tasks).await;
+
+        // Abort ticker tasks now that main tasks are done
+        for task in spinner_tasks {
+            task.abort();
+        }
+
+        // Clear rate limit progress bar
+        rate_limit_pb.finish_and_clear();
 
         // Check for errors
         for result in results {
@@ -165,15 +218,26 @@ impl GitHubSearcher {
         word: &str,
         file: Arc<tokio::sync::Mutex<tokio::fs::File>>,
         max_page_limit: Option<u32>,
-        pb: ProgressBar
+        pb: ProgressBar,
+        rate_limit_pb: Arc<ProgressBar>
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut page: u32 = 1;
 
         loop {
-            pb.set_message(format!("{} - page {}", word, page));
+            pb.set_message(format!("Searching {} - page {}", word, page));
 
             // Search this page
-            match GitHubSearcher::search_page(client, token, word, page, &file, &pb).await {
+            match
+                GitHubSearcher::search_page(
+                    client,
+                    token,
+                    word,
+                    page,
+                    &file,
+                    &pb,
+                    &rate_limit_pb
+                ).await
+            {
                 Ok(has_more_pages) => {
                     if !has_more_pages {
                         debug!("No more results for '{}'", word);
@@ -195,8 +259,6 @@ impl GitHubSearcher {
                     break;
                 }
             }
-
-            pb.tick();
         }
 
         Ok(())
@@ -209,7 +271,8 @@ impl GitHubSearcher {
         word: &str,
         page: u32,
         file: &Arc<tokio::sync::Mutex<tokio::fs::File>>,
-        pb: &ProgressBar
+        pb: &ProgressBar,
+        rate_limit_pb: &ProgressBar
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
         let url = format!(
             "https://api.github.com/search/code?q={}&page={}&per_page=100",
@@ -232,7 +295,7 @@ impl GitHubSearcher {
         }
 
         // Handle rate limiting
-        GitHubSearcher::handle_rate_limit(response.headers(), pb).await?;
+        GitHubSearcher::handle_rate_limit(response.headers(), pb, rate_limit_pb).await?;
 
         // Check for other errors
         if !response.status().is_success() {
@@ -317,32 +380,100 @@ impl GitHubSearcher {
         Ok(true)
     }
 
-    /// Handle GitHub API rate limiting
+    /// Handle GitHub API rate limiting with progress bar
     async fn handle_rate_limit(
         headers: &reqwest::header::HeaderMap,
-        pb: &ProgressBar
+        pb: &ProgressBar,
+        rate_limit_pb: &ProgressBar
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Update rate limit indicator
         if let Some(remaining_header) = headers.get("X-RateLimit-Remaining") {
             if let Ok(remaining_str) = remaining_header.to_str() {
                 if let Ok(remaining) = remaining_str.parse::<u32>() {
-                    if remaining == 0 {
-                        if let Some(reset_header) = headers.get("X-RateLimit-Reset") {
-                            if let Ok(reset_str) = reset_header.to_str() {
-                                if let Ok(reset_timestamp) = reset_str.parse::<u64>() {
-                                    let now = Utc::now().timestamp() as u64;
-                                    if reset_timestamp > now {
-                                        let wait_secs = reset_timestamp - now;
-                                        warn!(
-                                            "Rate limit reached. Waiting {} seconds...",
-                                            wait_secs + 1
-                                        );
-                                        pb.set_message(
-                                            format!(
-                                                "Rate limit hit - waiting {} seconds",
-                                                wait_secs + 1
-                                            )
-                                        );
-                                        sleep(Duration::from_secs(wait_secs + 1)).await;
+                    if let Some(limit_header) = headers.get("X-RateLimit-Limit") {
+                        if let Ok(limit_str) = limit_header.to_str() {
+                            if let Ok(limit) = limit_str.parse::<u32>() {
+                                // Calculate percentage of rate limit remaining
+                                let percentage = if limit > 0 {
+                                    (remaining * 100) / limit
+                                } else {
+                                    100
+                                };
+
+                                rate_limit_pb.set_message(
+                                    format!("Rate limit: {}/{}", remaining, limit)
+                                );
+                                rate_limit_pb.set_position(percentage.into());
+
+                                // If we're out of requests, wait for reset
+                                if remaining == 0 {
+                                    if let Some(reset_header) = headers.get("X-RateLimit-Reset") {
+                                        if let Ok(reset_str) = reset_header.to_str() {
+                                            if let Ok(reset_timestamp) = reset_str.parse::<u64>() {
+                                                let now = Utc::now().timestamp() as u64;
+                                                if reset_timestamp > now {
+                                                    let wait_secs = reset_timestamp - now;
+                                                    warn!(
+                                                        "Rate limit reached. Waiting {} seconds...",
+                                                        wait_secs + 1
+                                                    );
+
+                                                    // Save the current message to restore later
+                                                    let original_msg = pb.message();
+                                                    pb.set_message(
+                                                        format!(
+                                                            "Rate limited - waiting {} seconds",
+                                                            wait_secs + 1
+                                                        )
+                                                    );
+
+                                                    // Create a visual countdown
+                                                    let start = Instant::now();
+                                                    let duration = Duration::from_secs(
+                                                        wait_secs + 1
+                                                    );
+                                                    let end = start + duration;
+
+                                                    while Instant::now() < end {
+                                                        let elapsed = start.elapsed();
+                                                        if elapsed < duration {
+                                                            let remaining = duration - elapsed;
+                                                            let secs_remaining =
+                                                                remaining.as_secs();
+                                                            let percentage =
+                                                                ((
+                                                                    duration - remaining
+                                                                ).as_millis() *
+                                                                    100) /
+                                                                duration.as_millis();
+
+                                                            rate_limit_pb.set_position(
+                                                                percentage as u64
+                                                            );
+                                                            rate_limit_pb.set_message(
+                                                                format!("Rate limit cooldown: {}s remaining", secs_remaining)
+                                                            );
+                                                            pb.set_message(
+                                                                format!("Rate limited - waiting {}s", secs_remaining)
+                                                            );
+
+                                                            tokio::time::sleep(
+                                                                Duration::from_millis(500)
+                                                            ).await;
+                                                        } else {
+                                                            break;
+                                                        }
+                                                    }
+
+                                                    // Reset rate limit bar and restore original message
+                                                    rate_limit_pb.set_position(100);
+                                                    rate_limit_pb.set_message(
+                                                        "Rate limit status: Ready"
+                                                    );
+                                                    pb.set_message(original_msg);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
