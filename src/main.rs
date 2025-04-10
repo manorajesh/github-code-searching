@@ -1,21 +1,10 @@
 mod github_searcher;
 use github_searcher::GitHubSearcher;
 
-use chrono::Utc;
 use clap::Parser;
 use dotenv::dotenv;
-use futures::future::join_all;
-use indicatif::{ MultiProgress, ProgressBar, ProgressStyle };
-use reqwest::{ Client, StatusCode };
-use serde_json::{ json, Value };
-use std::env;
 use std::error::Error;
-use std::sync::Arc;
-use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
-use tokio::sync::Semaphore;
-use tokio::time::{ Duration, Instant };
-use tracing::{ debug, error, info, warn };
+use tracing::info;
 
 /// GitHub Code Search CLI
 #[derive(Parser)]
